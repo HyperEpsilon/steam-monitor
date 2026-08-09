@@ -2,12 +2,26 @@ from dotenv import load_dotenv
 import os
 import requests
 from pprint import pprint
+import sqlite3
 
 def main():
-    response = get_users_summary()
+    try:
+        connection = db_setup('./database/steam_monitor.db')
 
-    for user_data in response.json()['response']['players']:
-        record_user_stats(user_data)
+        response = get_users_summary()
+        timestamp = get_current_timestamp(connection)
+
+        for user_data in response.json()['response']['players']:
+            record_user_stats(connection, user_data, timestamp)
+    finally:
+        connection.close()
+
+def db_setup(path):
+    connection = sqlite3.connect(path)
+    cursor = connection.cursor()
+    cursor.execute(' PRAGMA foreign_keys=ON; ')
+    connection.commit()
+    return connection
 
 def get_users_summary():
     load_dotenv()
@@ -26,7 +40,7 @@ def get_users_summary():
     return request
 
 
-def record_user_stats(data):
+def record_user_stats(connection, data, timestamp):
     pass
     # update user_states table
 
@@ -35,6 +49,11 @@ def record_user_stats(data):
 
     # call GetRecentlyPlayedGames api
     # compare playtime_forever for each game. Add new record if different
+
+def get_current_timestamp(connection):
+    cur = connection.cursor()
+    res = cur.execute('SELECT unixepoch()').fetchone()
+    return res[0]
 
 
 if __name__ == "__main__":
