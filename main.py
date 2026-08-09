@@ -52,6 +52,7 @@ def record_user_stats(connection, data, timestamp):
 
     # call GetRecentlyPlayedGames api
     # compare playtime_forever for each game. Add new record if different
+    update_recent_played_games(connection, formatted_data['steam_id'], timestamp)
 
 def update_user_state(connection, data, timestamp):
     # get most recent user state
@@ -77,6 +78,52 @@ def update_user_state(connection, data, timestamp):
     VALUES (?, ?, ?, ?, ?)
     '''
     cur.execute(q2, (timestamp, data['steam_id'], data['persona_state'], data['game_id'], data['lastlogoff']))
+    connection.commit()
+
+def update_recent_played_games(connection, steam_id, timestamp):
+    recent_played_games_data = {
+        'key': os.getenv("STEAM_API_KEY"),
+        'steamid': steam_id,
+    }
+
+    response = requests.get('http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/', params=recent_played_games_data)
+    # TODO: Add response code checking and error handling
+
+    if response.json()['response']['total_count'] == 0:
+        return
+
+    cur = connection.cursor()
+    q2 = '''
+    SELECT playtime_forever
+    FROM gameplay_times
+    WHERE steam_id = ?
+    AND game_id = ?
+    ORDER BY timestamp DESC
+    LIMIT 1
+    '''
+    q1 = '''
+    INSERT INTO gameplay_times (timestamp, steam_id, game_id, playtime_forever)
+    VALUES (?, ?, ?, ?)
+    '''
+    q3 = '''
+    INSERT INTO games (game_id, name)
+    VALUES (?, ?)
+    '''
+
+    # Check each game
+    for game in response.json()['response']['games']:
+        # query DB, if playtime is different, then insert new record
+        res = cur.execute(q2, (steam_id, game['appid']))
+        row = res.fetchone()
+
+        if row == (game['playtime_forever'],):
+            continue
+
+        try:
+            cur.execute(q1, (timestamp, steam_id, game['appid'], game['playtime_forever']))
+        except sqlite3.IntegrityError as ex:
+            cur.execute(q3, (game['appid'], game['name']))
+            cur.execute(q1, (timestamp, steam_id, game['appid'], game['playtime_forever']))
     connection.commit()
 
 def get_current_timestamp(connection):
