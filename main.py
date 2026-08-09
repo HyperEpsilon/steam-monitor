@@ -41,9 +41,11 @@ def get_users_summary():
 
 
 def record_user_stats(connection, data, timestamp):
-    pass
+    # Sanitize the data and convert to the expected data types
+    formatted_data = format_data(data)
+    
     # update user_states table
-    update_user_state(connection, data, timestamp)
+    update_user_state(connection, formatted_data, timestamp)
 
     # call GetOwnedGames api
     # compare game count. If different, add all missing games
@@ -52,14 +54,6 @@ def record_user_stats(connection, data, timestamp):
     # compare playtime_forever for each game. Add new record if different
 
 def update_user_state(connection, data, timestamp):
-    new_data = {
-        'steam_id': int(data['steamid']),
-        'persona_state': data["personastate"],
-        'game_id': int(data.get('gameid')) if data.get('gameid') is not None else None,
-        'lastlogoff': data['lastlogoff']
-    }
-
-
     # get most recent user state
     q1 = '''
     SELECT persona_state, game_id, lastlogoff
@@ -69,12 +63,12 @@ def update_user_state(connection, data, timestamp):
     LIMIT 1
     '''
     cur = connection.cursor()
-    res = cur.execute(q1, (new_data['steam_id'],)) # tuple of length one required for sqlite
+    res = cur.execute(q1, (data['steam_id'],)) # tuple of length one required for sqlite
     row = res.fetchone()
 
     # compare stored user state to current state, return if identical
     # data.get is used because 'gameid' is not always a part of the response (when a user isn't playing a game)
-    if row is not None and row == (new_data['persona_state'], new_data['game_id'], new_data['lastlogoff']):
+    if row is not None and row == (data['persona_state'], data['game_id'], data['lastlogoff']):
         return
 
     # if different, add new row
@@ -82,7 +76,7 @@ def update_user_state(connection, data, timestamp):
     INSERT INTO user_states (timestamp, steam_id, persona_state, game_id, lastlogoff)
     VALUES (?, ?, ?, ?, ?)
     '''
-    cur.execute(q2, (timestamp, new_data['steam_id'], new_data['persona_state'], new_data['game_id'], new_data['lastlogoff']))
+    cur.execute(q2, (timestamp, data['steam_id'], data['persona_state'], data['game_id'], data['lastlogoff']))
     connection.commit()
 
 def get_current_timestamp(connection):
@@ -90,6 +84,13 @@ def get_current_timestamp(connection):
     res = cur.execute('SELECT unixepoch()').fetchone()
     return res[0]
 
+def format_data(data):
+    return {
+            'steam_id': int(data['steamid']),
+            'persona_state': data["personastate"],
+            'game_id': int(data.get('gameid')) if data.get('gameid') is not None else None,
+            'lastlogoff': data['lastlogoff']
+        }
 
 if __name__ == "__main__":
     main()
