@@ -43,12 +43,47 @@ def get_users_summary():
 def record_user_stats(connection, data, timestamp):
     pass
     # update user_states table
+    update_user_state(connection, data, timestamp)
 
     # call GetOwnedGames api
     # compare game count. If different, add all missing games
 
     # call GetRecentlyPlayedGames api
     # compare playtime_forever for each game. Add new record if different
+
+def update_user_state(connection, data, timestamp):
+    new_data = {
+        'steam_id': int(data['steamid']),
+        'persona_state': data["personastate"],
+        'game_id': int(data.get('gameid')) if data.get('gameid') is not None else None,
+        'lastlogoff': data['lastlogoff']
+    }
+
+
+    # get most recent user state
+    q1 = '''
+    SELECT persona_state, game_id, lastlogoff
+    FROM user_states
+    WHERE steam_id = ?
+    ORDER BY timestamp DESC
+    LIMIT 1
+    '''
+    cur = connection.cursor()
+    res = cur.execute(q1, (new_data['steam_id'],)) # tuple of length one required for sqlite
+    row = res.fetchone()
+
+    # compare stored user state to current state, return if identical
+    # data.get is used because 'gameid' is not always a part of the response (when a user isn't playing a game)
+    if row is not None and row == (new_data['persona_state'], new_data['game_id'], new_data['lastlogoff']):
+        return
+
+    # if different, add new row
+    q2 = '''
+    INSERT INTO user_states (timestamp, steam_id, persona_state, game_id, lastlogoff)
+    VALUES (?, ?, ?, ?, ?)
+    '''
+    cur.execute(q2, (timestamp, new_data['steam_id'], new_data['persona_state'], new_data['game_id'], new_data['lastlogoff']))
+    connection.commit()
 
 def get_current_timestamp(connection):
     cur = connection.cursor()
