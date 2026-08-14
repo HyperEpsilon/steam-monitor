@@ -1,10 +1,14 @@
 from dotenv import load_dotenv
 import os
 import requests
+from requests.exceptions import HTTPError
 from pprint import pprint
 import sqlite3
+from http import HTTPStatus
+import time
 
 def main():
+    load_dotenv()
     try:
         connection = db_setup('./database/steam_monitor.db')
 
@@ -14,7 +18,7 @@ def main():
         for user_data in response.json()['response']['players']:
             record_user_stats(connection, user_data, timestamp)
     finally:
-        connection.close()
+        connection.close() # type: ignore
 
 def db_setup(path):
     connection = sqlite3.connect(path)
@@ -23,9 +27,50 @@ def db_setup(path):
     connection.commit()
     return connection
 
-def get_users_summary():
-    load_dotenv()
+def fetch_api_json(connection: sqlite3.Connection, url: str, params: dict):
+    # Adapted from: https://stackoverflow.com/a/61463451
+    retries = 3
+    retry_codes = [
+        HTTPStatus.TOO_MANY_REQUESTS,
+        HTTPStatus.INTERNAL_SERVER_ERROR,
+        HTTPStatus.BAD_GATEWAY,
+        HTTPStatus.SERVICE_UNAVAILABLE,
+        HTTPStatus.GATEWAY_TIMEOUT,
+    ]
 
+    code = None
+    for n in range(retries):
+        try:
+            response = requests.get(url, params=params)
+            response.raise_for_status()
+
+            return response.json
+
+        except HTTPError as exc:
+            code = exc.response.status_code # pyright: ignore[reportOptionalMemberAccess]
+
+            # Retry connection if status code is retryable
+            if code in retry_codes:
+                time.sleep(n)
+                continue
+
+            # If status code is not retryable, go to logging
+            break
+
+    # Log error if max retries or code not retryable
+    q1 = '''
+    INSERT INTO errors (timestamp, timestamp_program, status_code, message, source)
+    VALUES (unixepoch(), ?, ?, ?, ?)
+    '''
+    cur = connection.cursor()
+    params_without_api_key = {i:params[i] for i in params if i !='key'}
+    cur.execute(q1, (None, code, params_without_api_key, 'api'))
+    connection.commit()
+
+    return False
+        
+
+def get_users_summary():
     api_key = os.getenv("STEAM_API_KEY")
     steam_ids = os.getenv("STEAM_IDS") # comma separated list of steamids
 
