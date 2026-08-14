@@ -2,187 +2,207 @@ from dotenv import load_dotenv
 import os
 import requests
 from requests.exceptions import HTTPError
-from pprint import pprint
 import sqlite3
 from http import HTTPStatus
 import time
+import json
 
-def main():
-    load_dotenv()
-    try:
-        connection = db_setup('./database/steam_monitor.db')
+# Imports for Testing
+from pprint import pprint
+import random
 
-        response = get_users_summary()
-        timestamp = get_current_timestamp(connection)
 
-        for user_data in response.json()['response']['players']:
-            record_user_stats(connection, user_data, timestamp)
-    finally:
-        connection.close() # type: ignore
+class SteamMonitor():
+    def __init__(self, db_path: str) -> None:
+        load_dotenv()
+        self.connection = self._db_setup(db_path)
 
-def db_setup(path):
-    connection = sqlite3.connect(path)
-    cursor = connection.cursor()
-    cursor.execute(' PRAGMA foreign_keys=ON; ')
-    connection.commit()
-    return connection
+    def __enter__(self) -> SteamMonitor:
+        return self
 
-def fetch_api_json(connection: sqlite3.Connection, url: str, params: dict):
-    # Adapted from: https://stackoverflow.com/a/61463451
-    retries = 3
-    retry_codes = [
-        HTTPStatus.TOO_MANY_REQUESTS,
-        HTTPStatus.INTERNAL_SERVER_ERROR,
-        HTTPStatus.BAD_GATEWAY,
-        HTTPStatus.SERVICE_UNAVAILABLE,
-        HTTPStatus.GATEWAY_TIMEOUT,
-    ]
+    def __exit__(self, exc_type, exc, tb) -> None:
+        # TODO: Log exception to DB, if any
+        # Close DB connection
+        self.connection.close()
 
-    code = None
-    for n in range(retries):
-        try:
-            response = requests.get(url, params=params)
-            response.raise_for_status()
+    def collect_data(self) -> None:
+        """One collection pass of all user data"""
+        self.timestamp = self._get_current_timestamp()
 
-            return response.json
-
-        except HTTPError as exc:
-            code = exc.response.status_code # pyright: ignore[reportOptionalMemberAccess]
-
-            # Retry connection if status code is retryable
-            if code in retry_codes:
-                time.sleep(n)
-                continue
-
-            # If status code is not retryable, go to logging
-            break
-
-    # Log error if max retries or code not retryable
-    q1 = '''
-    INSERT INTO errors (timestamp, timestamp_program, status_code, message, source)
-    VALUES (unixepoch(), ?, ?, ?, ?)
-    '''
-    cur = connection.cursor()
-    params_without_api_key = {i:params[i] for i in params if i !='key'}
-    cur.execute(q1, (None, code, params_without_api_key, 'api'))
-    connection.commit()
-
-    return False
+        # Get user summary
+        response = self._get_users_summary()
+        if not response:
+            return
         
-
-def get_users_summary():
-    api_key = os.getenv("STEAM_API_KEY")
-    steam_ids = os.getenv("STEAM_IDS") # comma separated list of steamids
-
-    summaries_data = {
-        'key': api_key,
-        'steamids': steam_ids
-    }
-
-    request = requests.get('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', params=summaries_data)
-
-    # TODO: Add response code checking and error handling
-    return request
-
-
-def record_user_stats(connection, data, timestamp):
-    # Sanitize the data and convert to the expected data types
-    formatted_data = format_data(data)
+        # Process user summary
+        for user_data in response['response']['players']: # pyright: ignore[reportIndexIssue]
+            self._record_user_stats(user_data)
     
-    # update user_states table
-    update_user_state(connection, formatted_data, timestamp)
+    def _get_users_summary(self) -> dict | bool:
+        summaries_data = {
+            'key': os.getenv("STEAM_API_KEY"),
+            'steamids': os.getenv("STEAM_IDS") # comma separated list of steamids
+        }
+        return self._fetch_api_json('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', summaries_data)
 
-    # call GetOwnedGames api
-    # compare game count. If different, add all missing games
+    def _record_user_stats(self, data: dict) -> None:
+        # Sanitize the data and convert to the expected data types
+        formatted_data = self._format_data(data)
+        
+        # update user_states table
+        self._update_user_state(formatted_data)
 
-    # call GetRecentlyPlayedGames api
-    # compare playtime_forever for each game. Add new record if different
-    update_recent_played_games(connection, formatted_data['steam_id'], timestamp)
+        # call GetOwnedGames api
+        # compare game count. If different, add all missing games
 
-def update_user_state(connection, data, timestamp):
-    # get most recent user state
-    q1 = '''
-    SELECT persona_state, game_id, lastlogoff
-    FROM user_states
-    WHERE steam_id = ?
-    ORDER BY timestamp DESC
-    LIMIT 1
-    '''
-    cur = connection.cursor()
-    res = cur.execute(q1, (data['steam_id'],)) # tuple of length one required for sqlite
-    row = res.fetchone()
+        # call GetRecentlyPlayedGames api
+        # compare playtime_forever for each game. Add new record if different
+        self._update_recent_played_games(formatted_data['steam_id'])
 
-    # compare stored user state to current state, return if identical
-    # data.get is used because 'gameid' is not always a part of the response (when a user isn't playing a game)
-    if row is not None and row == (data['persona_state'], data['game_id'], data['lastlogoff']):
-        return
-
-    # if different, add new row
-    q2 = '''
-    INSERT INTO user_states (timestamp, steam_id, persona_state, game_id, lastlogoff)
-    VALUES (?, ?, ?, ?, ?)
-    '''
-    cur.execute(q2, (timestamp, data['steam_id'], data['persona_state'], data['game_id'], data['lastlogoff']))
-    connection.commit()
-
-def update_recent_played_games(connection, steam_id, timestamp):
-    recent_played_games_data = {
-        'key': os.getenv("STEAM_API_KEY"),
-        'steamid': steam_id,
-    }
-
-    response = requests.get('http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/', params=recent_played_games_data)
-    # TODO: Add response code checking and error handling
-
-    if response.json()['response']['total_count'] == 0:
-        return
-
-    cur = connection.cursor()
-    q2 = '''
-    SELECT playtime_forever
-    FROM gameplay_times
-    WHERE steam_id = ?
-    AND game_id = ?
-    ORDER BY timestamp DESC
-    LIMIT 1
-    '''
-    q1 = '''
-    INSERT INTO gameplay_times (timestamp, steam_id, game_id, playtime_forever)
-    VALUES (?, ?, ?, ?)
-    '''
-    q3 = '''
-    INSERT INTO games (game_id, name)
-    VALUES (?, ?)
-    '''
-
-    # Check each game
-    for game in response.json()['response']['games']:
-        # query DB, if playtime is different, then insert new record
-        res = cur.execute(q2, (steam_id, game['appid']))
+    def _update_user_state(self, data: dict) -> None:
+        # get most recent user state
+        q1 = '''
+        SELECT persona_state, game_id, lastlogoff
+        FROM user_states
+        WHERE steam_id = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        '''
+        cur = self.connection.cursor()
+        res = cur.execute(q1, (data['steam_id'],)) # tuple of length one required for sqlite
         row = res.fetchone()
 
-        if row == (game['playtime_forever'],):
-            continue
+        # compare stored user state to current state, return if identical
+        # data.get is used because 'gameid' is not always a part of the response (when a user isn't playing a game)
+        if row is not None and row == (data['persona_state'], data['game_id'], data['lastlogoff']):
+            return
 
-        try:
-            cur.execute(q1, (timestamp, steam_id, game['appid'], game['playtime_forever']))
-        except sqlite3.IntegrityError as ex:
-            cur.execute(q3, (game['appid'], game['name']))
-            cur.execute(q1, (timestamp, steam_id, game['appid'], game['playtime_forever']))
-    connection.commit()
+        # if different, add new row
+        q2 = '''
+        INSERT INTO user_states (timestamp, steam_id, persona_state, game_id, lastlogoff)
+        VALUES (?, ?, ?, ?, ?)
+        '''
+        cur.execute(q2, (self.timestamp, data['steam_id'], data['persona_state'], data['game_id'], data['lastlogoff']))
+        self.connection.commit()
 
-def get_current_timestamp(connection):
-    cur = connection.cursor()
-    res = cur.execute('SELECT unixepoch()').fetchone()
-    return res[0]
-
-def format_data(data):
-    return {
-            'steam_id': int(data['steamid']),
-            'persona_state': data["personastate"],
-            'game_id': int(data.get('gameid')) if data.get('gameid') is not None else None,
-            'lastlogoff': data['lastlogoff']
+    def _update_recent_played_games(self, steam_id: int) -> None:
+        recent_played_games_data = {
+            'key': os.getenv("STEAM_API_KEY"),
+            'steamid': steam_id,
         }
+
+        response = self._fetch_api_json('http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/', recent_played_games_data)
+
+        if not response or response['response']['total_count'] == 0: # pyright: ignore[reportIndexIssue]
+            return
+
+        cur = self.connection.cursor()
+        q2 = '''
+        SELECT playtime_forever
+        FROM gameplay_times
+        WHERE steam_id = ?
+        AND game_id = ?
+        ORDER BY timestamp DESC
+        LIMIT 1
+        '''
+        q1 = '''
+        INSERT INTO gameplay_times (timestamp, steam_id, game_id, playtime_forever)
+        VALUES (?, ?, ?, ?)
+        '''
+        q3 = '''
+        INSERT INTO games (game_id, name)
+        VALUES (?, ?)
+        '''
+
+        # Check each game
+        for game in response['response']['games']: # pyright: ignore[reportIndexIssue]
+            # query DB, if playtime is different, then insert new record
+            res = cur.execute(q2, (steam_id, game['appid']))
+            row = res.fetchone()
+
+            if row == (game['playtime_forever'],):
+                continue
+
+            try:
+                cur.execute(q1, (self.timestamp, steam_id, game['appid'], game['playtime_forever']))
+            except sqlite3.IntegrityError as ex:
+                cur.execute(q3, (game['appid'], game['name']))
+                cur.execute(q1, (self.timestamp, steam_id, game['appid'], game['playtime_forever']))
+        self.connection.commit()
+
+    def _db_setup(self, path: str) -> sqlite3.Connection:
+        connection = sqlite3.connect(path)
+        cursor = connection.cursor()
+        cursor.execute(' PRAGMA foreign_keys=ON; ')
+        connection.commit()
+        return connection
+
+    def _get_current_timestamp(self) -> int:
+            cur = self.connection.cursor()
+            res = cur.execute('SELECT unixepoch()').fetchone()
+            return res[0]
+
+    def _fetch_api_json(self, url: str, params: dict) -> dict | bool:
+        # Adapted from: https://stackoverflow.com/a/61463451
+        retries = 3
+        retry_codes = [
+            HTTPStatus.TOO_MANY_REQUESTS,
+            HTTPStatus.INTERNAL_SERVER_ERROR,
+            HTTPStatus.BAD_GATEWAY,
+            HTTPStatus.SERVICE_UNAVAILABLE,
+            HTTPStatus.GATEWAY_TIMEOUT,
+        ]
+
+        code = None
+        msg = None
+        for n in range(retries):
+            try:
+                response = requests.get(url, params=params)
+                response.raise_for_status()
+
+                if random.random() < 0.75:
+                    raise HTTPError('test error message', response=response)
+
+                return response.json()
+
+            except HTTPError as exc:
+                code = exc.response.status_code # pyright: ignore[reportOptionalMemberAccess]
+                msg = str(exc)
+
+                # Retry connection if status code is retryable
+                if code in retry_codes:
+                    time.sleep(n)
+                    continue
+
+                # If status code is not retryable, go to logging
+                break
+
+        # Log error if max retries or code not retryable
+        q1 = '''
+        INSERT INTO errors (timestamp, timestamp_program, status_code, message, params, source)
+        VALUES (unixepoch(), ?, ?, ?, ?, ?)
+        '''
+        cur = self.connection.cursor()
+        params_without_api_key = {i:params[i] for i in params if i !='key'}
+        params_without_api_key['url'] = url
+        cur.execute(q1, (self.timestamp, code, msg, json.dumps(params_without_api_key), 'api'))
+        self.connection.commit()
+
+        return False
+
+    @staticmethod
+    def _format_data(data: dict) -> dict:
+        return {
+                'steam_id': int(data['steamid']),
+                'persona_state': data["personastate"],
+                'game_id': int(data.get('gameid')) if data.get('gameid') is not None else None, # pyright: ignore[reportArgumentType]
+                'lastlogoff': data['lastlogoff']
+            }
+
+
+def main():
+    with SteamMonitor('./database/steam_monitor.db') as monitor:
+        monitor.collect_data()
 
 if __name__ == "__main__":
     main()
