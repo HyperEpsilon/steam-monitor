@@ -15,7 +15,7 @@ import random
 class SteamMonitor():
     def __init__(self, db_path: str) -> None:
         load_dotenv()
-        self.connection = self._db_setup(db_path)
+        self.connection = self.db_setup(db_path)
 
     def __enter__(self) -> SteamMonitor:
         return self
@@ -27,39 +27,39 @@ class SteamMonitor():
 
     def collect_data(self) -> None:
         """One collection pass of all user data"""
-        self.timestamp = self._get_current_timestamp()
+        self.timestamp = self.get_current_timestamp()
 
         # Get user summary
-        response = self._get_users_summary()
+        response = self.get_users_summary()
         if not response:
             return
         
         # Process user summary
         for user_data in response['response']['players']: # pyright: ignore[reportIndexIssue]
-            self._record_user_stats(user_data)
+            self.record_user_stats(user_data)
     
-    def _get_users_summary(self) -> dict | bool:
+    def get_users_summary(self) -> dict | bool:
         summaries_data = {
             'key': os.getenv("STEAM_API_KEY"),
             'steamids': os.getenv("STEAM_IDS") # comma separated list of steamids
         }
-        return self._fetch_api_json('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', summaries_data)
+        return self.fetch_api_json('https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v0002/', summaries_data)
 
-    def _record_user_stats(self, data: dict) -> None:
+    def record_user_stats(self, data: dict) -> None:
         # Sanitize the data and convert to the expected data types
-        formatted_data = self._format_data(data)
+        formatted_data = self.format_data(data)
         
         # update user_states table
-        self._update_user_state(formatted_data)
+        self.update_user_state(formatted_data)
 
         # call GetOwnedGames api
         # compare game count. If different, add all missing games
 
         # call GetRecentlyPlayedGames api
         # compare playtime_forever for each game. Add new record if different
-        self._update_recent_played_games(formatted_data['steam_id'])
+        self.update_recent_played_games(formatted_data['steam_id'])
 
-    def _update_user_state(self, data: dict) -> None:
+    def update_user_state(self, data: dict) -> None:
         # get most recent user state
         q1 = '''
         SELECT persona_state, game_id, lastlogoff
@@ -85,13 +85,13 @@ class SteamMonitor():
         cur.execute(q2, (self.timestamp, data['steam_id'], data['persona_state'], data['game_id'], data['lastlogoff']))
         self.connection.commit()
 
-    def _update_recent_played_games(self, steam_id: int) -> None:
+    def update_recent_played_games(self, steam_id: int) -> None:
         recent_played_games_data = {
             'key': os.getenv("STEAM_API_KEY"),
             'steamid': steam_id,
         }
 
-        response = self._fetch_api_json('http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/', recent_played_games_data)
+        response = self.fetch_api_json('http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/', recent_played_games_data)
 
         if not response or response['response']['total_count'] == 0: # pyright: ignore[reportIndexIssue]
             return
@@ -130,19 +130,19 @@ class SteamMonitor():
                 cur.execute(q1, (self.timestamp, steam_id, game['appid'], game['playtime_forever']))
         self.connection.commit()
 
-    def _db_setup(self, path: str) -> sqlite3.Connection:
+    def db_setup(self, path: str) -> sqlite3.Connection:
         connection = sqlite3.connect(path)
         cursor = connection.cursor()
         cursor.execute(' PRAGMA foreign_keys=ON; ')
         connection.commit()
         return connection
 
-    def _get_current_timestamp(self) -> int:
+    def get_current_timestamp(self) -> int:
             cur = self.connection.cursor()
             res = cur.execute('SELECT unixepoch()').fetchone()
             return res[0]
 
-    def _fetch_api_json(self, url: str, params: dict) -> dict | bool:
+    def fetch_api_json(self, url: str, params: dict) -> dict | bool:
         # Adapted from: https://stackoverflow.com/a/61463451
         retries = 3
         retry_codes = [
@@ -191,7 +191,7 @@ class SteamMonitor():
         return False
 
     @staticmethod
-    def _format_data(data: dict) -> dict:
+    def format_data(data: dict) -> dict:
         return {
                 'steam_id': int(data['steamid']),
                 'persona_state': data["personastate"],
