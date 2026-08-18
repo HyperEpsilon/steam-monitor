@@ -5,7 +5,10 @@ CREATE TABLE IF NOT EXISTS "error_access_logs" (
 );
 CREATE TABLE IF NOT EXISTS "errors" (
 	"timestamp"	INTEGER NOT NULL,
+	"timestamp_program"	INTEGER,
+	"status_code"	INTEGER,
 	"message"	TEXT,
+	"params"	TEXT,
 	"source"	TEXT,
 	PRIMARY KEY("timestamp")
 );
@@ -26,10 +29,12 @@ CREATE TABLE IF NOT EXISTS "games" (
 	PRIMARY KEY("game_id")
 );
 CREATE TABLE IF NOT EXISTS "owned_games" (
+	"rowid"	INTEGER NOT NULL,
 	"game_id"	INTEGER NOT NULL,
 	"steam_id"	INTEGER NOT NULL,
-	"first_seen"	INTEGER NOT NULL,
-	PRIMARY KEY("game_id","steam_id"),
+	"timestamp_added"	INTEGER NOT NULL,
+	"timestamp_removed"	INTEGER,
+	PRIMARY KEY("rowid" AUTOINCREMENT),
 	FOREIGN KEY("game_id") REFERENCES "games"("game_id"),
 	FOREIGN KEY("steam_id") REFERENCES "users"("steam_id")
 );
