@@ -160,9 +160,6 @@ class SteamMonitor():
                 response = requests.get(url, params=params)
                 response.raise_for_status()
 
-                if random.random() < 0.75:
-                    raise HTTPError('test error message', response=response)
-
                 return response.json()
 
             except HTTPError as exc:
