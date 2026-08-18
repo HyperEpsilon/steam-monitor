@@ -54,6 +54,7 @@ class SteamMonitor():
 
         # call GetOwnedGames api
         # compare game count. If different, add all missing games
+        self.compare_and_update_game_count(formatted_data['steam_id'])
 
         # call GetRecentlyPlayedGames api
         # compare playtime_forever for each game. Add new record if different
@@ -85,6 +86,83 @@ class SteamMonitor():
         cur.execute(q2, (self.timestamp, data['steam_id'], data['persona_state'], data['game_id'], data['lastlogoff']))
         self.connection.commit()
 
+    def compare_and_update_game_count(self, steam_id: int) -> None:
+        # compare game count. If different, add all missing games
+        
+        # Call API
+        owned_games_data = {
+            'key': os.getenv("STEAM_API_KEY"),
+            'steamid': steam_id,
+            'include_appinfo': 1,
+            'include_played_free_games': 1,
+        }
+        response = self.fetch_api_json('https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/', owned_games_data)
+        if not response:
+            return
+        assert isinstance(response, dict)
+
+        # Compare API response "game_count" to DB query based on steam_id and null last_seen
+        cur = self.connection.cursor()
+        q1 = '''
+        SELECT count(game_id)
+        FROM owned_games
+        WHERE steam_id = ?
+        AND timestamp_removed IS NULL
+        '''
+        res = cur.execute(q1, (steam_id,))
+        db_game_count = res.fetchone()[0]
+        if db_game_count == response['response']['game_count']:
+            return
+
+        # If different, query DB with all rows and compare to API response
+        q2 = '''
+        SELECT game_id
+        FROM owned_games
+        WHERE steam_id = ?
+        AND timestamp_removed IS NULL
+        '''
+        res = cur.execute(q2, (steam_id,))
+        db_games = res.fetchall()
+
+        # Dict comprehension to transform API response into {appid: name}
+        api_games = {game['appid']:game['name'] for game in response['response']['games']}
+
+        # Loop through all rows from DB, removing from API dict any values in DB
+        removed_games = []
+        for db_game in db_games:
+            val = api_games.pop(db_game[0], None)
+            if val == None:
+                removed_games.append((db_game[0]))
+
+        # set 'last_seen' for any games in DB but not in API
+        if len(removed_games) > 0:
+            q3 = '''
+            UPDATE owned_games
+            SET timestamp_removed = ?
+            WHERE steam_id = ?
+            AND game_id = ?
+            AND timestamp_removed IS NULL
+            '''
+            cur.execute(q3, [(self.timestamp, steam_id, game_id) for game_id in removed_games])
+        
+        # Add new row for all remaining games in API dict
+        if len(api_games) > 0:
+            # Insert or ignore list into 'games' table first
+            q4 = '''
+            INSERT OR IGNORE
+            INTO games (game_id, name)
+            VALUES (?, ?)
+            '''
+            cur.executemany(q4, [(game_id, api_games[game_id]) for game_id in api_games])
+            q5 = '''
+            INSERT INTO owned_games (game_id, steam_id, timestamp_added)
+            values (?, ?, ?)
+            '''
+            cur.executemany(q5, [(game_id, steam_id, self.timestamp) for game_id in api_games])
+        self.connection.commit()
+        return
+        
+
     def update_recent_played_games(self, steam_id: int) -> None:
         recent_played_games_data = {
             'key': os.getenv("STEAM_API_KEY"),
@@ -92,7 +170,6 @@ class SteamMonitor():
         }
 
         response = self.fetch_api_json('http://api.steampowered.com/IPlayerService/GetRecentlyPlayedGames/v0001/', recent_played_games_data)
-
         if not response or response['response']['total_count'] == 0: # pyright: ignore[reportIndexIssue]
             return
 
